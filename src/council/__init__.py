@@ -1,0 +1,3 @@
+"""Deliberative Council — Multi-Agent LLM Debate System."""
+
+__version__ = "0.1.0"

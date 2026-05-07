@@ -1,0 +1,42 @@
+# Deliberative Council Default Configuration
+# Override any setting via CLI flags or a custom YAML file.
+
+# NLI agreement tracking
+nli:
+  tier1_model: "cross-encoder/nli-deberta-v3-large"
+  tier1_uncertain_low: 0.25
+  tier1_uncertain_high: 0.65
+  convergence_threshold: 0.75
+  convergence_rounds: 2
+  position_stability_threshold: 0.80
+  position_stability_rounds: 2
+  tier2_model: "openai/gpt-4.1-mini"
+  graceful_degradation: true
+
+# Token budgets
+budget:
+  default_budget: 500000
+  max_per_agent: 100000
+  research_share: 0.3
+  debate_share: 0.5
+  synthesis_share: 0.2
+
+# Debate settings
+debate:
+  default_rounds:
+    trivial: 0
+    moderate: 1
+    complex: 2
+    deep: 3
+  max_concurrent_agents: 3
+  graph_strategy: "full"
+  debate_strategy: "none"
+  context_strategy: "full"
+
+# Research settings
+research:
+  mode: "strict"
+  max_concurrent_agents: 3
+  jina_search_url: "https://s.jina.ai"
+  jina_extract_url: "https://r.jina.ai"
+  max_search_results: 5
