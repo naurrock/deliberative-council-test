@@ -260,7 +260,7 @@ class TestModelSelection:
 # ── LLMClient ──────────────────────────────────────────────────────────
 
 
-class TestLLLClient:
+class TestLLMClient:
     @pytest.mark.asyncio
     async def test_complete_success(self):
         """Test a successful completion call (mocked)."""
@@ -295,3 +295,96 @@ class TestLLLClient:
                 model_id="openai/gpt-4.1-mini",
                 messages=[{"role": "user", "content": "Hello"}],
             )
+
+    @pytest.mark.asyncio
+    async def test_complete_with_budget_override(self):
+        """Test that budget_override takes precedence over self.budget."""
+        reg = ModelRegistry(SAMPLE_MODELS)
+        # Client has no budget attached
+        client = LLMClient(reg, budget=None)
+
+        # But we pass a per-call budget
+        phase_budget = TokenBudget(total=100000)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 100
+
+        with patch("council.models.litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
+            content, tokens = await client.complete(
+                model_id="openai/gpt-4.1-mini",
+                messages=[{"role": "user", "content": "Hello"}],
+                budget_override=phase_budget,
+            )
+            assert content == "Test response"
+            assert tokens == 100
+            # Phase budget should be consumed, not the client's (which is None)
+            assert phase_budget.used == 100
+
+    @pytest.mark.asyncio
+    async def test_complete_budget_override_exhausted(self):
+        """Test that an exhausted budget_override raises RuntimeError."""
+        reg = ModelRegistry(SAMPLE_MODELS)
+        # Client has a generous budget
+        client_budget = TokenBudget(total=1000000)
+        client = LLMClient(reg, budget=client_budget)
+
+        # But the phase override is exhausted
+        phase_budget = TokenBudget(total=0)
+
+        with pytest.raises(RuntimeError, match="budget exhausted"):
+            await client.complete(
+                model_id="openai/gpt-4.1-mini",
+                messages=[{"role": "user", "content": "Hello"}],
+                budget_override=phase_budget,
+            )
+        # Client's own budget should NOT be consumed
+        assert client_budget.used == 0
+
+    @pytest.mark.asyncio
+    async def test_complete_no_budget_no_override(self):
+        """Test that a call works fine when neither budget nor override is set."""
+        reg = ModelRegistry(SAMPLE_MODELS)
+        client = LLMClient(reg, budget=None)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 100
+
+        with patch("council.models.litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
+            content, tokens = await client.complete(
+                model_id="openai/gpt-4.1-mini",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+            assert content == "Test response"
+            assert tokens == 100
+
+    @pytest.mark.asyncio
+    async def test_complete_override_takes_precedence_over_client_budget(self):
+        """When both client budget and override are set, override wins."""
+        reg = ModelRegistry(SAMPLE_MODELS)
+        client_budget = TokenBudget(total=100000)
+        client = LLMClient(reg, budget=client_budget)
+
+        override_budget = TokenBudget(total=50000)
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.usage = MagicMock()
+        mock_response.usage.total_tokens = 100
+
+        with patch("council.models.litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
+            content, tokens = await client.complete(
+                model_id="openai/gpt-4.1-mini",
+                messages=[{"role": "user", "content": "Hello"}],
+                budget_override=override_budget,
+            )
+            assert tokens == 100
+            # Override budget should be consumed, not client budget
+            assert override_budget.used == 100
+            assert client_budget.used == 0  # Not touched

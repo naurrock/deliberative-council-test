@@ -150,7 +150,12 @@ async def run_council(
     registry = ModelRegistry.from_config(cfg)
     tools = ToolRegistry()
     budget = TokenBudget(total=cfg.budget_override or cfg.budget.default_budget)
-    client = LLMClient(registry, budget)
+
+    # Detach global budget to prevent double-counting across phases.
+    # Each phase (Scout, Research, Debate) tracks its own sub-budget
+    # and reports consumption back to the main budget manually.
+    client = LLMClient(registry, budget=None)
+
     checkpoint = CheckpointManager(rid)
 
     # Check for existing checkpoint (resume support)

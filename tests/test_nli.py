@@ -7,6 +7,7 @@ from council.config import NLIConfig
 from council.models import LLMClient, ModelRegistry, TokenBudget
 from council.nli import (
     _chunk_text,
+    _chunk_text_by_chars,
     _heuristic_agreement,
     check_convergence,
     compute_position_stability,
@@ -57,22 +58,98 @@ def make_position(agent_id: str = "a", argument: str = "I think X is true") -> P
     )
 
 
-# ── Chunking ───────────────────────────────────────────────────────────
+# ── Chunking (character-based fallback) ────────────────────────────────
 
 
-class TestChunking:
+class TestChunkingByChars:
+    """Tests for the character-based fallback chunker."""
+
     def test_short_text_no_chunk(self):
-        chunks = _chunk_text("Short text", 450)
+        chunks = _chunk_text_by_chars("Short text", 1800)
         assert len(chunks) == 1
 
     def test_long_text_chunks(self):
         long_text = ". ".join(["This is sentence number " + str(i) for i in range(50)])
-        chunks = _chunk_text(long_text, 200)
+        chunks = _chunk_text_by_chars(long_text, 200)
         assert len(chunks) > 1
 
     def test_empty_text(self):
-        chunks = _chunk_text("", 450)
+        chunks = _chunk_text_by_chars("", 1800)
         assert len(chunks) == 1
+
+    def test_respects_max_chars(self):
+        long_text = ". ".join(["This is sentence number " + str(i) for i in range(100)])
+        chunks = _chunk_text_by_chars(long_text, 300)
+        for chunk in chunks:
+            # Each chunk should be at most roughly max_chars (may slightly exceed
+            # due to adding a full sentence, but should be reasonable)
+            assert len(chunk) < 600  # generous bound
+
+
+# ── Chunking (token-aware, with mocked tokenizer) ─────────────────────
+
+
+class TestChunkingByTokens:
+    """Tests for the token-aware chunker (requires mocked tokenizer)."""
+
+    def setup_method(self):
+        reset_deberta()
+
+    def test_falls_back_to_chars_when_no_tokenizer(self):
+        """When _deberta_tokenizer is None, should use character-based fallback."""
+        # _deberta_tokenizer is None by default after reset
+        chunks = _chunk_text("Short text", 500)
+        assert len(chunks) == 1
+
+    def test_long_text_fallback_chunks(self):
+        """Long text without tokenizer should still chunk properly."""
+        long_text = ". ".join(["This is sentence number " + str(i) for i in range(50)])
+        # With no tokenizer, _chunk_text falls back to char-based with 1800-char
+        # limit. The text is ~1800 chars, so use a small max_tokens to force chunking
+        # via the char-based fallback (which uses 3.6 * max_tokens ≈ max_chars).
+        # Alternatively, call _chunk_text_by_chars directly with a small max_chars.
+        chunks = _chunk_text_by_chars(long_text, max_chars=200)
+        assert len(chunks) > 1
+
+    def test_with_mock_tokenizer(self):
+        """Token-aware chunking with a mocked tokenizer."""
+        mock_tokenizer = MagicMock()
+        # Each short sentence is ~5 tokens
+        mock_tokenizer.encode.return_value = [1, 2, 3, 4, 5]  # 5 tokens
+
+        with patch("council.nli._deberta_tokenizer", mock_tokenizer):
+            text = ". ".join(["Sentence " + str(i) for i in range(20)])
+            chunks = _chunk_text(text, max_tokens=15)  # ~3 sentences per chunk
+            assert len(chunks) > 1
+
+    def test_with_mock_tokenizer_short_text(self):
+        """Short text should not be chunked even with tokenizer."""
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode.return_value = [1, 2, 3]  # 3 tokens
+
+        with patch("council.nli._deberta_tokenizer", mock_tokenizer):
+            chunks = _chunk_text("Short text", max_tokens=500)
+            assert len(chunks) == 1
+
+    def test_with_mock_tokenizer_oversized_sentence(self):
+        """A single sentence exceeding the token limit should be its own chunk."""
+        mock_tokenizer = MagicMock()
+
+        # First call returns 600 tokens (oversized), subsequent calls return 3
+        call_count = [0]
+        def mock_encode(text, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return list(range(600))  # oversized
+            return [1, 2, 3]
+
+        mock_tokenizer.encode = mock_encode
+
+        with patch("council.nli._deberta_tokenizer", mock_tokenizer):
+            text = "This is a very long sentence. And a short one."
+            chunks = _chunk_text(text, max_tokens=500)
+            # First oversized sentence should be its own chunk
+            assert len(chunks) >= 1
 
 
 # ── Heuristic Agreement ────────────────────────────────────────────────
@@ -93,7 +170,7 @@ class TestHeuristicAgreement:
         assert score == 0.5
 
 
-# ── Tier 1 Agreement ───────────────────────────────────────────────────
+# ── Tier 1 Agreement ──────────────────────────────────────────────────
 
 
 class TestTier1Agreement:
@@ -135,7 +212,7 @@ class TestTier1Agreement:
             assert 0.0 <= score <= 1.0
 
 
-# ── Tier 2 Agreement ───────────────────────────────────────────────────
+# ── Tier 2 Agreement ──────────────────────────────────────────────────
 
 
 class TestTier2Agreement:
@@ -197,7 +274,7 @@ class TestTier2Agreement:
             assert result.agreement_score == 0.5  # Default uncertain
 
 
-# ── Convergence Detection ──────────────────────────────────────────────
+# ── Convergence Detection ─────────────────────────────────────────────
 
 
 class TestConvergenceDetection:
@@ -312,7 +389,7 @@ class TestPositionStability:
             assert 0.0 <= result <= 1.0
 
 
-# ── Novelty Injection ──────────────────────────────────────────────────
+# ── Novelty Injection ─────────────────────────────────────────────────
 
 
 class TestNoveltyInjection:

@@ -321,14 +321,23 @@ class LLMClient:
         temperature: float = 0.7,
         response_format: dict | None = None,
         tools: list[dict] | None = None,
+        budget_override: TokenBudget | None = None,
         **kwargs,
     ) -> tuple[str, int]:
         """Make a completion call and return (response_text, tokens_used).
 
+        Args:
+            budget_override: Optional per-call budget tracker. If provided,
+                used instead of self.budget, allowing phases to track their
+                own consumption independently without double-counting.
+
         Raises RuntimeError if the call fails after retries.
         """
+        # Use the call-level budget if provided, otherwise fall back to the client-level one
+        active_budget = budget_override or self.budget
+
         # Check budget before making the call
-        if self.budget and self.budget.is_exhausted:
+        if active_budget and active_budget.is_exhausted:
             raise RuntimeError("Token budget exhausted")
 
         retries = 2
@@ -353,8 +362,8 @@ class LLMClient:
                 usage = response.usage
                 tokens_used = usage.total_tokens if usage else 0
 
-                if self.budget:
-                    self.budget.consume(tokens_used)
+                if active_budget:
+                    active_budget.consume(tokens_used)
                 self.registry.record_usage(model_id, tokens_used)
 
                 return content, tokens_used
@@ -419,6 +428,7 @@ class LLMClient:
         schema: type,
         max_tokens: int = 4096,
         temperature: float = 0.3,
+        budget_override: TokenBudget | None = None,
         **kwargs,
     ) -> tuple[Any, int]:
         """Make a completion call expecting JSON output that conforms to a Pydantic schema.
@@ -450,6 +460,7 @@ class LLMClient:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 response_format={"type": "json_object"},
+                budget_override=budget_override,
                 **kwargs,
             )
         except Exception:
@@ -459,6 +470,7 @@ class LLMClient:
                 messages=augmented_messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                budget_override=budget_override,
                 **kwargs,
             )
 

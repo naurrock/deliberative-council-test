@@ -353,12 +353,12 @@ async def _run_debate_round(
                 logger.warning(f"Critique generation failed {agent_id}->{other_id}: {e}")
 
     # Step 4: Compute agreement matrix (NLI two-tier)
-    agreement_matrix: dict[str, dict[str, float]] = {}
-    nli_tier2_invoked: dict[str, dict[str, bool]] = {}
+    # Initialize all top-level keys first to prevent overwrite when
+    # iterating through subsequent agents.
+    agreement_matrix: dict[str, dict[str, float]] = {aid: {} for aid in agent_ids}
+    nli_tier2_invoked: dict[str, dict[str, bool]] = {aid: {} for aid in agent_ids}
 
     for i, aid in enumerate(agent_ids):
-        agreement_matrix[aid] = {}
-        nli_tier2_invoked[aid] = {}
         for j, bid in enumerate(agent_ids):
             if i >= j:
                 continue
@@ -370,17 +370,15 @@ async def _run_debate_round(
                     position_map[aid], position_map[bid], client, nli_config
                 )
                 agreement_matrix[aid][bid] = score
-                agreement_matrix[bid] = agreement_matrix.get(bid, {})
                 agreement_matrix[bid][aid] = score
                 nli_tier2_invoked[aid][bid] = tier2_used
-                nli_tier2_invoked[bid] = nli_tier2_invoked.get(bid, {})
                 nli_tier2_invoked[bid][aid] = tier2_used
             except Exception as e:
                 logger.warning(f"NLI agreement failed {aid}<->{bid}: {e}")
                 agreement_matrix[aid][bid] = 0.5
-                agreement_matrix.setdefault(bid, {})[aid] = 0.5
+                agreement_matrix[bid][aid] = 0.5
                 nli_tier2_invoked[aid][bid] = False
-                nli_tier2_invoked.setdefault(bid, {})[aid] = False
+                nli_tier2_invoked[bid][aid] = False
 
     # Step 5: Compute behavioral signals
     behavioral_signals: dict[str, BehavioralSignals] = {}

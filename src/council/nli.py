@@ -103,10 +103,10 @@ def _deberta_score(text_a: str, text_b: str) -> float:
     assert _deberta_model is not None
     assert _deberta_tokenizer is not None
 
-    # Chunk long texts
-    max_len = 450  # Leave room for special tokens
-    chunks_a = _chunk_text(text_a, max_len)
-    chunks_b = _chunk_text(text_b, max_len)
+    # Chunk long texts (token-aware, preserving sentence boundaries)
+    max_tokens = 500  # Leave room for special tokens within 512 limit
+    chunks_a = _chunk_text(text_a, max_tokens)
+    chunks_b = _chunk_text(text_b, max_tokens)
 
     if len(chunks_a) == 1 and len(chunks_b) == 1:
         return _deberta_single(chunks_a[0], chunks_b[0])
@@ -143,14 +143,77 @@ def _deberta_single(text_a: str, text_b: str) -> float:
     return probs[0][entailment_idx].item()
 
 
-def _chunk_text(text: str, max_chars: int = 450) -> list[str]:
-    """Split text into chunks that fit within DeBERTa's token limit."""
+def _chunk_text(text: str, max_tokens: int = 500) -> list[str]:
+    """Split text into chunks by exact token count, preserving sentence boundaries.
+
+    Uses the DeBERTa tokenizer for precise token counting when available,
+    falling back to a character-based approximation otherwise.
+
+    Args:
+        text: The text to chunk.
+        max_tokens: Maximum tokens per chunk (default 500, leaving room
+            for special tokens within DeBERTa's 512-token limit).
+
+    Returns:
+        A list of text chunks, each within the token limit.
+    """
+    # Fallback to character-based chunking if tokenizer is not loaded
+    if _deberta_tokenizer is None:
+        return _chunk_text_by_chars(text)
+
+    # Split text into logical sentences first
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    chunks: list[str] = []
+    current_chunk = ""
+    current_tokens = 0
+
+    for sentence in sentences:
+        # Tokenize just the sentence to get its exact length
+        # (add_special_tokens=False because the final model call will add them)
+        sentence_tokens = len(_deberta_tokenizer.encode(sentence, add_special_tokens=False))
+
+        # Edge case: a single sentence exceeds the limit (rare for standard text)
+        if sentence_tokens > max_tokens:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+                current_tokens = 0
+            logger.warning(
+                "Encountered a single sentence exceeding %d tokens; "
+                "it will be truncated by the model.",
+                max_tokens,
+            )
+            chunks.append(sentence)
+            continue
+
+        # Group sentences until the token limit is reached
+        if current_tokens + sentence_tokens > max_tokens and current_chunk:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+            current_tokens = sentence_tokens
+        else:
+            current_chunk = f"{current_chunk} {sentence}".strip()
+            current_tokens += sentence_tokens
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    return chunks if chunks else [text]
+
+
+def _chunk_text_by_chars(text: str, max_chars: int = 1800) -> list[str]:
+    """Character-based fallback for chunking when tokenizer is unavailable.
+
+    Uses 1800 chars as a reasonable approximation of ~500 tokens for
+    English text (average ~3.6 chars/token).
+    """
     if len(text) <= max_chars:
         return [text]
 
     # Split on sentence boundaries
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    chunks = []
+    chunks: list[str] = []
     current = ""
 
     for sentence in sentences:
