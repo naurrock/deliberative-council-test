@@ -121,6 +121,9 @@ class MissionBrief(BaseModel):
     human_checkpoints: list[str] = Field(
         default_factory=list, description="Descriptions of points for human input"
     )
+    scout_tokens_used: int = Field(
+        default=0, description="Tokens consumed by the Scout phase (tracked separately)"
+    )
     scout_reasoning: str = Field(description="Full reasoning trace from scout agent")
     verification_notes: str = Field(description="Notes from verification agent")
 
@@ -361,7 +364,7 @@ class FinalReport(BaseModel):
 class ModelInfo(BaseModel):
     """Information about an available model."""
 
-    model_id: str = Field(description="LiteLLM model identifier, e.g. 'openai/gpt-4.1-mini'")
+    model_id: str = Field(description="LiteLLM model identifier, e.g. 'openrouter/meta-llama/llama-3.3-70b-instruct:free'")
     family: str = Field(description="Model family, e.g. 'openai', 'anthropic'")
     tier: ModelTier = Field(description="Capability tier")
     context_window: int = Field(description="Maximum context window in tokens")
@@ -369,6 +372,17 @@ class ModelInfo(BaseModel):
     output_cost_per_m: float = Field(default=0.0, description="Output cost per million tokens")
     supports_local: bool = Field(default=False, description="Whether available via Ollama")
     is_available: bool = Field(default=True, description="Whether currently reachable")
+
+    # Provider routing (for Cloudflare, custom endpoints)
+    provider: str = Field(default="", description="Provider name, e.g. 'cloudflare', 'openrouter'")
+    api_base: str = Field(default="", description="Custom API base URL (env-expanded)")
+    api_key: str = Field(default="", description="API key (env-expanded)")
+    conserve: bool = Field(default=False, description="True if credits are non-regenerating")
+    geo_blocked: bool = Field(default=False, description="True if provider is geo-blocked from this server")
+    canonical_id: str = Field(default="", description="Canonical model ID for cross-provider dedup (e.g. 'llama-3.3-70b')")
+    rpm: int = Field(default=20, description="Requests per minute limit")
+    daily_quota: int = Field(default=0, description="Daily request quota (0=unlimited)")
+    regenerates: bool = Field(default=True, description="Whether daily quota regenerates")
 
 
 class HealthCheckResult(BaseModel):
@@ -378,3 +392,28 @@ class HealthCheckResult(BaseModel):
     is_healthy: bool
     latency_ms: float | None = Field(default=None)
     error: str | None = Field(default=None)
+
+
+# ── Provider Info ──────────────────────────────────────────────────────
+
+
+class ProviderInfo(BaseModel):
+    """Metadata about an LLM provider (from the providers: section of providers.yaml).
+
+    Used for:
+    - Cross-provider fallback awareness (same model on different providers)
+    - Quota tracking (daily_quota, regenerates, conserve flag)
+    - Geo-blocking awareness
+    - Priority ordering
+    """
+
+    name: str = Field(description="Provider name, e.g. 'cloudflare', 'openrouter'")
+    priority: int = Field(default=0, description="Lower = preferred. 0 = highest priority")
+    env_key: str = Field(default="", description="Environment variable name for API key")
+    regenerates: bool = Field(default=True, description="Whether daily quota regenerates")
+    daily_quota: int = Field(default=0, description="Daily request quota (0=unlimited)")
+    rpm: int = Field(default=20, description="Requests per minute limit")
+    geo_blocked: bool = Field(default=False, description="Whether provider is geo-blocked from this server")
+    conserve: bool = Field(default=False, description="True if credits are non-regenerating")
+    api_base_template: str = Field(default="", description="API base URL template with {ENV_VAR} placeholders")
+    notes: str = Field(default="", description="Human-readable notes")

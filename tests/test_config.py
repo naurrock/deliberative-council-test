@@ -19,7 +19,7 @@ from council.config import (
     DEFAULT_MODELS,
     DEFAULT_FALLBACK_CHAINS,
 )
-from council.types import Complexity, ModelTier, ResearchMode
+from council.types import Complexity, ModelTier, ProviderInfo, ResearchMode
 
 
 # ── ModelConfig ────────────────────────────────────────────────────────
@@ -180,10 +180,10 @@ class TestLoadConfig:
     def test_default_models_in_config(self):
         config = load_default_config()
         model_ids = [m.model_id for m in config.models]
-        # Check some key models exist
-        assert any("gpt-4.1" in mid for mid in model_ids)
-        assert any("qwen3" in mid for mid in model_ids)
-        assert any("deepseek" in mid for mid in model_ids)
+        # Check key free-tier models exist (Cloudflare + OpenRouter)
+        assert any("cloudflare" in m or "@cf/" in m for m in model_ids)
+        assert any("openrouter" in m for m in model_ids)
+        assert any("llama" in m for m in model_ids)
 
     def test_default_fallback_chains(self):
         config = load_default_config()
@@ -198,17 +198,110 @@ class TestLoadConfig:
 
 
 class TestDefaultModels:
-    def test_covers_all_families(self):
+    def test_covers_multiple_families(self):
         families = {m.family for m in DEFAULT_MODELS}
-        expected = {"openai", "anthropic", "google", "deepseek", "alibaba", "meta", "mistral", "microsoft", "moonshot"}
-        assert expected.issubset(families), f"Missing families: {expected - families}"
+        # Default models cover at least llama and qwen families
+        assert "llama" in families
+        assert "qwen" in families
 
     def test_covers_all_tiers(self):
         tiers = {m.tier for m in DEFAULT_MODELS}
-        assert ModelTier.PREMIUM in tiers
         assert ModelTier.MID in tiers
         assert ModelTier.CHEAP in tiers
 
-    def test_has_local_models(self):
-        local_models = [m for m in DEFAULT_MODELS if m.supports_local]
-        assert len(local_models) > 0, "Should have at least some local models"
+    def test_all_free_tier(self):
+        """All default models should be free-tier (zero cost)."""
+        for m in DEFAULT_MODELS:
+            assert m.input_cost_per_m == 0.0, f"{m.model_id} has non-zero cost"
+            assert m.output_cost_per_m == 0.0, f"{m.model_id} has non-zero cost"
+
+    def test_includes_cloudflare_models(self):
+        cf_models = [m for m in DEFAULT_MODELS if m.provider == "cloudflare"]
+        assert len(cf_models) > 0, "Should have Cloudflare models in defaults"
+
+    def test_includes_openrouter_models(self):
+        or_models = [m for m in DEFAULT_MODELS if m.provider == "openrouter"]
+        assert len(or_models) > 0, "Should have OpenRouter models in defaults"
+
+
+# ── ProviderInfo Parsing ────────────────────────────────────────────────
+
+
+class TestProviderInfo:
+    """Tests for the providers: section parsing from providers.yaml."""
+
+    def test_provider_info_creation(self):
+        pi = ProviderInfo(
+            name="cloudflare",
+            priority=0,
+            env_key="CLOUDFLARE_API_KEY",
+            regenerates=True,
+            daily_quota=10000,
+            rpm=50,
+            notes="55 LLM models",
+        )
+        assert pi.name == "cloudflare"
+        assert pi.priority == 0
+        assert pi.regenerates is True
+        assert pi.daily_quota == 10000
+
+    def test_provider_info_geo_blocked(self):
+        pi = ProviderInfo(
+            name="groq",
+            priority=3,
+            env_key="GROQ_API_KEY",
+            regenerates=True,
+            geo_blocked=True,
+        )
+        assert pi.geo_blocked is True
+
+    def test_provider_info_conserve(self):
+        pi = ProviderInfo(
+            name="sambanova",
+            priority=4,
+            env_key="SAMBANOVA_API_KEY",
+            regenerates=False,
+            conserve=True,
+        )
+        assert pi.conserve is True
+        assert pi.regenerates is False
+
+    def test_providers_parsed_from_yaml(self):
+        """Test that the providers: section of providers.yaml is parsed."""
+        yaml_content = {
+            "providers": {
+                "cloudflare": {
+                    "priority": 0,
+                    "env_key": "CLOUDFLARE_API_KEY",
+                    "regenerates": True,
+                    "daily_quota": 10000,
+                    "rpm": 50,
+                },
+                "openrouter": {
+                    "priority": 1,
+                    "env_key": "OPENROUTER_API_KEY",
+                    "regenerates": True,
+                    "daily_quota": 50,
+                },
+            },
+            "models": [
+                {
+                    "model_id": "test/model",
+                    "family": "test",
+                    "tier": "cheap",
+                },
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            yaml.dump(yaml_content, f)
+            f.flush()
+            config = load_config(f.name)
+
+        assert "cloudflare" in config.providers
+        assert "openrouter" in config.providers
+        assert config.providers["cloudflare"].priority == 0
+        assert config.providers["openrouter"].priority == 1
+        assert config.providers["cloudflare"].daily_quota == 10000
+        assert config.providers["openrouter"].regenerates is True

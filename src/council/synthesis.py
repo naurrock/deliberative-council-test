@@ -163,29 +163,32 @@ def _select_synthesizer(
     """
     from council.types import ModelTier
 
-    # Find which families were used in the debate
-    debater_families = set()
-    if debate_state.rounds:
-        for round_result in debate_state.rounds:
-            for pos in round_result.positions:
-                # We can't directly know the family from Position, so we check
-                # the model registry for what was likely used
-                pass
-
-    # Get all model families from the registry
-    available_families = registry.available_families()
-
-    # Prefer premium or mid-tier from a family not in the debater set
-    # For now, we select the best available model from any family,
-    # with preference for premium tier
+    # Check for explicit override first
     if config.model_overrides and "synthesizer" in config.model_overrides:
         override = config.model_overrides["synthesizer"]
         model = registry.get(override)
         if model and model.is_available:
             return override
 
-    # Try premium models first
+    # Find which families were used by debaters by looking at registry usage
+    debater_families: set[str] = set()
+    usage = registry.get_usage()
+    for model_id, model_usage in usage.items():
+        # Any model that was used but isn't the synthesizer candidate
+        # is likely a debater or research agent — record its family
+        debater_families.add(model_usage.family)
+
+    # Try premium models from a family NOT used by debaters
     premium_models = registry.models_by_tier(ModelTier.PREMIUM)
+    non_debater_premium = [m for m in premium_models if m.family not in debater_families]
+    if non_debater_premium:
+        if config.family:
+            family_match = [m for m in non_debater_premium if m.family == config.family]
+            if family_match:
+                return family_match[0].model_id
+        return min(non_debater_premium, key=lambda m: m.input_cost_per_m).model_id
+
+    # If all premium families are taken, still prefer premium for quality
     if premium_models:
         if config.family:
             family_match = [m for m in premium_models if m.family == config.family]
@@ -193,14 +196,16 @@ def _select_synthesizer(
                 return family_match[0].model_id
         return premium_models[0].model_id
 
-    # Fallback to mid-tier
+    # Fallback to mid-tier (again, prefer non-debater families)
     mid_models = registry.models_by_tier(ModelTier.MID)
+    non_debater_mid = [m for m in mid_models if m.family not in debater_families]
+    if non_debater_mid:
+        return min(non_debater_mid, key=lambda m: m.input_cost_per_m).model_id
     if mid_models:
         return mid_models[0].model_id
 
-    # Last resort: first available model
-    available = registry.available_models()
-    return available[0].model_id if available else "openai/gpt-4.1-mini"
+    # No models available — can't proceed
+    raise RuntimeError("No models available for synthesizer. Configure providers.yaml with at least one model.")
 
 
 def _build_debate_summary(debate_state: DebateState) -> str:
@@ -376,11 +381,10 @@ def _build_pipeline_trace(
     """Build the pipeline trace with per-role model usage."""
     usage = registry.get_usage()
 
-    # Map usage to roles
+    # Map usage to roles — determine role from fallback chain membership
     models_used = {}
     for model_id, model_usage in usage.items():
-        # Determine role from model_id
-        role = _infer_role(model_id, debate_state)
+        role = _infer_role(model_id, registry)
         models_used[role] = model_usage
 
     # Add synthesizer
@@ -395,15 +399,12 @@ def _build_pipeline_trace(
     scout_tokens = 0  # Tracked separately
     research_tokens = sum(r.tokens_used for r in evidence)
     debate_tokens = sum(
-        tokens for role, mu in models_used.items()
+        mu.tokens for role, mu in models_used.items()
         if role.startswith("debater") or role.startswith("nli_tier2")
-        for tokens in [mu.tokens]
     )
-    # If no debater usage tracked yet, estimate from state
+    # If no debater usage tracked yet, estimate from total minus known phases
     if debate_tokens == 0 and debate_state.rounds:
-        debate_tokens = sum(
-            tokens for mu in models_used.values() for tokens in [mu.tokens]
-        ) - synthesis_tokens
+        debate_tokens = sum(mu.tokens for mu in models_used.values()) - synthesis_tokens
 
     return PipelineTrace(
         models_used=models_used,
@@ -414,14 +415,30 @@ def _build_pipeline_trace(
     )
 
 
-def _infer_role(model_id: str, debate_state: DebateState) -> str:
-    """Infer the role name for a model based on debate state."""
-    # Simple heuristic: try to match model to roles
-    for i, round_result in enumerate(debate_state.rounds):
-        for pos in round_result.positions:
-            # We can't directly map position to model, use agent_id
-            pass
-    return model_id.split("/")[-1].replace("-", "_").replace(".", "_")
+def _infer_role(model_id: str, registry: ModelRegistry) -> str:
+    """Infer the role name for a model based on its position in fallback chains.
+
+    Checks the registry's fallback chains to determine which role type
+    this model was likely used for. If the model appears in a chain,
+    the chain's role_type is used. Otherwise, falls back to a
+    sanitized model_id key.
+    """
+    # Check each fallback chain for this model_id
+    for role_type, chain in registry._fallback_chains.items():
+        if model_id in chain:
+            # Model appears in this role's fallback chain
+            # Use role_type as the key (e.g. "debater", "research", "synthesizer")
+            # If multiple models share a chain, disambiguate with index
+            idx = chain.index(model_id)
+            if idx == 0:
+                return role_type
+            return f"{role_type}_fallback_{idx}"
+
+    # Not in any chain — use a readable key from the model_id
+    parts = model_id.split("/")
+    if len(parts) >= 2:
+        return f"{parts[-2]}_{parts[-1]}".replace("-", "_").replace(".", "_")
+    return model_id.replace("/", "_").replace("-", "_").replace(".", "_")
 
 
 def _avg_agreement(agreement_matrix: dict[str, dict[str, float]]) -> float:
@@ -454,7 +471,6 @@ def _generate_markdown(report: FinalReport) -> str:
         lines.append("## Key Points")
         lines.append("")
         for kp in report.key_points:
-            consensus_emoji = {"strong": "✓", "moderate": "~", "contested": "✗"}
             lines.append(
                 f"- [{kp.consensus.value}] {kp.point}"
             )

@@ -210,7 +210,8 @@ def _to_pdf(report: FinalReport) -> str:
     md_content = _to_markdown(report)
     html_content = _markdown_to_html(md_content)
 
-    output_path = tempfile.mktemp(suffix=".pdf")
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        output_path = tmp.name
     try:
         from weasyprint import HTML
 
@@ -297,7 +298,8 @@ def _to_docx(report: FinalReport) -> str:
     table.rows[4].cells[0].text = "Synthesis"
     table.rows[4].cells[1].text = f"{trace.synthesis_tokens:,}"
 
-    output_path = tempfile.mktemp(suffix=".docx")
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        output_path = tmp.name
     doc.save(output_path)
     return output_path
 

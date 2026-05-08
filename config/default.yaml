@@ -10,7 +10,7 @@ nli:
   convergence_rounds: 2
   position_stability_threshold: 0.80
   position_stability_rounds: 2
-  tier2_model: "openai/gpt-4.1-mini"
+  tier2_model: "openrouter/meta-llama/llama-3.3-70b-instruct:free"
   graceful_degradation: true
 
 # Token budgets

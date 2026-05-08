@@ -1,0 +1,567 @@
+# Deliberative Council — Provider-Prioritized Model Configuration
+#
+# Priority order (highest to lowest):
+#   0. Cloudflare Workers AI — 10K neurons/day, DAILY REGEN, 55 LLM models, HK OK
+#   1. OpenRouter free models — 50 RPD, 28 free models, HK OK
+#   2. Gemini — 1,500 RPD, regenerates daily (GEO-BLOCKED from HK)
+#   3. Groq — ~14,400 RPD, regenerates daily (GEO-BLOCKED from HK)
+#   4. SambaNova — conserve $5 credits (non-regenerating), HK OK
+#   5. Cerebras — limited free tier (non-regenerating, GEO-BLOCKED)
+#
+# Family diversity is the core principle: each debater should use a
+# model from a DIFFERENT family for genuine reasoning diversity.
+#
+# FAILURE TRACKING — Two-strikes escalation:
+#   Strike 1: TRANSIENT (60s cooldown) — any failure (429, timeout, etc.)
+#   Strike 2: DAILY (until midnight UTC) — second failure confirms exhaustion
+#   No provider-specific error classification needed. The pattern speaks.
+#
+# GEO-BLOCKED models are filtered at selection time (never tried, never
+# tracked in FailureTracker). They're listed here for completeness but
+# will never be selected unless the server moves to an allowed region.
+#
+# CANONICAL_ID links the same underlying model across providers, so the
+# selection algorithm knows that e.g. llama-3.3-70b on Cloudflare is
+# the same model as llama-3.3-70b on OpenRouter (just different routes).
+#
+# IMPORTANT: Cloudflare models use the openai/ prefix with a custom
+# api_base pointing to Cloudflare's OpenAI-compatible endpoint. This
+# bypasses litellm's buggy native cloudflare handler (which uses the
+# old /ai/run/ endpoint that breaks on newer model response formats).
+
+providers:
+  cloudflare:
+    priority: 0
+    env_key: CLOUDFLARE_API_KEY
+    env_account_id: CLOUDFLARE_ACCOUNT_ID
+    regenerates: true
+    daily_quota: 10000       # 10K neurons/day (varies by model size)
+    rpm: 50
+    api_base_template: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+    notes: "55 LLM models. Daily regenerating neuron budget. Best ongoing free option. Uses OpenAI-compat endpoint."
+
+  openrouter:
+    priority: 1
+    env_key: OPENROUTER_API_KEY
+    regenerates: true
+    daily_quota: 50          # 50 RPD on free tier (1,000 if $10 spent)
+    rpm: 20
+    notes: "28 free models with :free suffix. Good family diversity."
+
+  gemini:
+    priority: 2
+    env_key: GEMINI_API_KEY
+    regenerates: true
+    daily_quota: 1500
+    rpm: 15
+    notes: "Generous free tier. GEO-BLOCKED from HK server."
+    geo_blocked: true
+
+  groq:
+    priority: 3
+    env_key: GROQ_API_KEY
+    regenerates: true
+    daily_quota: 14400
+    rpm: 30
+    notes: "Fastest inference (LPU hardware). GEO-BLOCKED from HK server."
+    geo_blocked: true
+
+  sambanova:
+    priority: 4
+    env_key: SAMBANOVA_API_KEY
+    regenerates: false
+    credit_remaining: 5.00   # USD, non-regenerating
+    notes: "$5 signup credits. Conserve for later testing."
+
+  cerebras:
+    priority: 5
+    env_key: CEREBRAS_API_KEY
+    regenerates: false
+    credit_remaining: 0.00
+    notes: "Very limited free tier. GEO-BLOCKED from HK server."
+    geo_blocked: true
+
+# ── Model Registry ────────────────────────────────────────────────────────
+#
+# Cloudflare models use `openai/` prefix with api_base pointing to CF's
+# OpenAI-compatible /ai/v1 endpoint. This works around litellm's broken
+# native cloudflare handler (which hits /ai/run/ and expects old response
+# format). The CF API key goes in api_key field.
+#
+# Model IDs use the pattern: openai/@cf/<org>/<model-name>
+# The api_base resolves to:  https://api.cloudflare.com/client/v4/accounts/{ID}/ai/v1
+#
+# canonical_id identifies the same underlying model across providers.
+# e.g. "llama-3.3-70b-instruct" is the same weights on Cloudflare,
+# OpenRouter, Groq, SambaNova, and Cerebras — just different routes.
+
+models:
+  # ═══════════════════════════════════════════════════════════════════════
+  # CHEAP tier (Scout, Research agents)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # Cloudflare cheap models (Priority 0, daily regen)
+  - model_id: openai/@cf/meta/llama-3.2-3b-instruct
+    canonical_id: llama-3.2-3b-instruct
+    family: llama
+    tier: cheap
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  - model_id: openai/@cf/ibm-granite/granite-4.0-h-micro
+    family: granite
+    tier: cheap
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  - model_id: openai/@cf/meta/llama-3.1-8b-instruct-fp8-fast
+    canonical_id: llama-3.1-8b-instruct
+    family: llama
+    tier: cheap
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # OpenRouter cheap (Priority 1)
+  - model_id: openrouter/meta-llama/llama-3.2-3b-instruct:free
+    canonical_id: llama-3.2-3b-instruct
+    family: llama
+    tier: cheap
+    context_window: 131072
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  # Gemini cheap (Priority 2, geo-blocked from HK)
+  - model_id: gemini/gemini-2.0-flash-lite
+    family: gemini
+    tier: cheap
+    context_window: 1048576
+    provider: gemini
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  # Groq cheap (Priority 3, geo-blocked from HK)
+  - model_id: groq/llama-3.1-8b-instant
+    canonical_id: llama-3.1-8b-instruct
+    family: llama
+    tier: cheap
+    context_window: 131072
+    provider: groq
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # MID tier (Debaters — maximize family diversity)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # ── Cloudflare models (Priority 0, daily regen) ──────────────────────
+  # 10K neurons/day covers ~50-100 requests on these models.
+  # 11 unique families — maximum diversity for debate!
+
+  # Llama family
+  - model_id: openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast
+    canonical_id: llama-3.3-70b-instruct
+    family: llama
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Qwen family
+  - model_id: openai/@cf/qwen/qwen3-30b-a3b-fp8
+    family: qwen
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # DeepSeek family (reasoning model)
+  - model_id: openai/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b
+    family: deepseek
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # GPT-OSS family
+  - model_id: openai/@cf/openai/gpt-oss-120b
+    canonical_id: gpt-oss-120b
+    family: gpt-oss
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Llama-4/Scout family
+  - model_id: openai/@cf/meta/llama-4-scout-17b-16e-instruct
+    family: llama4
+    tier: mid
+    context_window: 262144
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Gemma family
+  - model_id: openai/@cf/google/gemma-4-26b-a4b-it
+    canonical_id: gemma-4-26b-it
+    family: gemma
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Mistral family
+  - model_id: openai/@cf/mistralai/mistral-small-3.1-24b-instruct
+    family: mistral
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Nemotron family
+  - model_id: openai/@cf/nvidia/nemotron-3-120b-a12b
+    canonical_id: nemotron-3-120b
+    family: nemotron
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # GLM family
+  - model_id: openai/@cf/zai-org/glm-4.7-flash
+    family: glm
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Moonshot family
+  - model_id: openai/@cf/moonshotai/kimi-k2.5
+    canonical_id: kimi-k2.5
+    family: moonshot
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # QwQ family (reasoning)
+  - model_id: openai/@cf/qwen/qwq-32b
+    family: qwq
+    tier: mid
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # ── OpenRouter free models (Priority 1, 50 RPD shared bucket) ────────
+
+  - model_id: openrouter/meta-llama/llama-3.3-70b-instruct:free
+    canonical_id: llama-3.3-70b-instruct
+    family: llama
+    tier: mid
+    context_window: 65536
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/qwen/qwen3-coder:free
+    family: qwen
+    tier: mid
+    context_window: 262000
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/google/gemma-4-31b-it:free
+    canonical_id: gemma-4-31b-it
+    family: gemma
+    tier: mid
+    context_window: 262144
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+    canonical_id: nemotron-3-super-120b
+    family: nemotron
+    tier: mid
+    context_window: 262144
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/openai/gpt-oss-120b:free
+    canonical_id: gpt-oss-120b
+    family: gpt-oss
+    tier: mid
+    context_window: 131072
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/nousresearch/hermes-3-llama-3.1-405b:free
+    family: hermes
+    tier: mid
+    context_window: 131072
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/minimax/minimax-m2.5:free
+    family: minimax
+    tier: mid
+    context_window: 196608
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  - model_id: openrouter/z-ai/glm-4.5-air:free
+    family: glm
+    tier: mid
+    context_window: 131072
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  # ── Gemini fallbacks (Priority 2, geo-blocked from HK) ───────────────
+  - model_id: gemini/gemini-2.5-flash
+    family: gemini
+    tier: mid
+    context_window: 1048576
+    provider: gemini
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  # ── Groq fallbacks (Priority 3, geo-blocked from HK) ────────────────
+  - model_id: groq/llama-3.3-70b-versatile
+    canonical_id: llama-3.3-70b-instruct
+    family: llama
+    tier: mid
+    context_window: 131072
+    provider: groq
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  - model_id: groq/qwen3-32b
+    family: qwen
+    tier: mid
+    context_window: 131072
+    provider: groq
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  # ── SambaNova fallbacks (Priority 4, NON-REGENERATING — conserve) ───
+  - model_id: sambanova/Meta-Llama-3.3-70B-Instruct
+    canonical_id: llama-3.3-70b-instruct
+    family: llama
+    tier: mid
+    context_window: 131072
+    provider: sambanova
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    conserve: true
+
+  - model_id: sambanova/DeepSeek-V3-0324
+    family: deepseek
+    tier: mid
+    context_window: 131072
+    provider: sambanova
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    conserve: true
+
+  # ── Cerebras fallbacks (Priority 5, geo-blocked, conserve) ───────────
+  - model_id: cerebras/llama-3.3-70b
+    canonical_id: llama-3.3-70b-instruct
+    family: llama
+    tier: mid
+    context_window: 131072
+    provider: cerebras
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    conserve: true
+    geo_blocked: true
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # PREMIUM tier (Synthesizer — best available model)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # Cloudflare premium (Priority 0, daily regen)
+  - model_id: openai/@cf/openai/gpt-oss-120b
+    canonical_id: gpt-oss-120b
+    family: gpt-oss
+    tier: premium
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  - model_id: openai/@cf/nvidia/nemotron-3-120b-a12b
+    canonical_id: nemotron-3-120b
+    family: nemotron
+    tier: premium
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  - model_id: openai/@cf/moonshotai/kimi-k2.5
+    canonical_id: kimi-k2.5
+    family: moonshot
+    tier: premium
+    context_window: 131072
+    provider: cloudflare
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    api_base: "${CLOUDFLARE_API_BASE}"
+    api_key: "${CLOUDFLARE_API_KEY}"
+
+  # Gemini premium (Priority 2, geo-blocked from HK)
+  - model_id: gemini/gemini-2.5-pro
+    family: gemini
+    tier: premium
+    context_window: 1048576
+    provider: gemini
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  - model_id: gemini/gemini-2.5-flash
+    family: gemini
+    tier: premium
+    context_window: 1048576
+    provider: gemini
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    geo_blocked: true
+
+  # OpenRouter premium (Priority 1)
+  - model_id: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+    canonical_id: nemotron-3-super-120b
+    family: nemotron
+    tier: premium
+    context_window: 262144
+    provider: openrouter
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+
+  # SambaNova premium (Priority 4, conserve)
+  - model_id: sambanova/Meta-Llama-3.3-70B-Instruct
+    canonical_id: llama-3.3-70b-instruct
+    family: llama
+    tier: premium
+    context_window: 131072
+    provider: sambanova
+    input_cost_per_m: 0.0
+    output_cost_per_m: 0.0
+    conserve: true
+
+# ── Fallback Chains ─────────────────────────────────────────────────────
+# Ordered lists of model IDs to try when the primary model fails.
+# Geo-blocked models are listed for documentation but will be skipped
+# by resolve_fallback() — they'll never actually be tried.
+#
+# With two-strikes escalation, a model that fails twice gets marked
+# DAILY (until midnight). The fallback chain then moves on.
+
+fallback_chains:
+  research:
+    - openai/@cf/meta/llama-3.2-3b-instruct
+    - openai/@cf/ibm-granite/granite-4.0-h-micro
+    - openai/@cf/meta/llama-3.1-8b-instruct-fp8-fast
+    - openrouter/meta-llama/llama-3.2-3b-instruct:free
+    # Geo-blocked (listed for completeness, skipped by resolve_fallback)
+    - gemini/gemini-2.0-flash-lite
+    - groq/llama-3.1-8b-instant
+
+  debater:
+    # Cloudflare first (11 families, daily regen)
+    - openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast
+    - openai/@cf/qwen/qwen3-30b-a3b-fp8
+    - openai/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b
+    - openai/@cf/openai/gpt-oss-120b
+    - openai/@cf/meta/llama-4-scout-17b-16e-instruct
+    - openai/@cf/google/gemma-4-26b-a4b-it
+    - openai/@cf/mistralai/mistral-small-3.1-24b-instruct
+    - openai/@cf/nvidia/nemotron-3-120b-a12b
+    - openai/@cf/zai-org/glm-4.7-flash
+    - openai/@cf/moonshotai/kimi-k2.5
+    - openai/@cf/qwen/qwq-32b
+    # OpenRouter next (50 RPD shared)
+    - openrouter/meta-llama/llama-3.3-70b-instruct:free
+    - openrouter/qwen/qwen3-coder:free
+    - openrouter/google/gemma-4-31b-it:free
+    - openrouter/nvidia/nemotron-3-super-120b-a12b:free
+    - openrouter/openai/gpt-oss-120b:free
+    # Geo-blocked (listed for completeness, skipped by resolve_fallback)
+    - gemini/gemini-2.5-flash
+    - groq/llama-3.3-70b-versatile
+    - groq/qwen3-32b
+    # Conserved providers (last resort)
+    - sambanova/DeepSeek-V3-0324
+    - cerebras/llama-3.3-70b
+
+  synthesizer:
+    # Cloudflare first (120B-class models)
+    - openai/@cf/openai/gpt-oss-120b
+    - openai/@cf/nvidia/nemotron-3-120b-a12b
+    - openai/@cf/moonshotai/kimi-k2.5
+    # OpenRouter
+    - openrouter/nvidia/nemotron-3-super-120b-a12b:free
+    # Geo-blocked (listed for completeness, skipped by resolve_fallback)
+    - gemini/gemini-2.5-pro
+    - gemini/gemini-2.5-flash
+    # Conserved
+    - sambanova/Meta-Llama-3.3-70B-Instruct

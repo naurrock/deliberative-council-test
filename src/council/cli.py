@@ -85,7 +85,7 @@ def ask(
     ),
     model_override: Optional[list[str]] = typer.Option(
         None, "--model",
-        help="Override model for a role: role=model_id (e.g. debater_0=openai/gpt-4.1)",
+        help="Override model for a role: role=model_id (e.g. debater_0=openrouter/meta-llama/llama-3.3-70b-instruct:free)",
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"

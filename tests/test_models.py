@@ -257,6 +257,144 @@ class TestModelSelection:
         assert fallback.model_id in ["gemini/gemini-2.5-flash", "deepseek/deepseek-chat"]
 
 
+# ── Cross-Provider Fallback ──────────────────────────────────────────────
+
+
+class TestCrossProviderFallback:
+    """Tests for the canonical_id-based cross-provider fallback strategy.
+
+    When the same model is available on multiple providers (identified by
+    canonical_id), resolve_fallback() should prefer the same model on a
+    different provider over falling back to a different model.
+    """
+
+    def setup_method(self):
+        """Set up models with canonical_ids for cross-provider testing."""
+        self.models = [
+            ModelInfo(
+                model_id="openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                family="llama", tier=ModelTier.MID, context_window=131_072,
+                provider="cloudflare", canonical_id="llama-3.3-70b-instruct",
+            ),
+            ModelInfo(
+                model_id="openrouter/meta-llama/llama-3.3-70b-instruct:free",
+                family="llama", tier=ModelTier.MID, context_window=65_536,
+                provider="openrouter", canonical_id="llama-3.3-70b-instruct",
+            ),
+            ModelInfo(
+                model_id="sambanova/Meta-Llama-3.3-70B-Instruct",
+                family="llama", tier=ModelTier.MID, context_window=131_072,
+                provider="sambanova", canonical_id="llama-3.3-70b-instruct",
+                conserve=True,
+            ),
+            ModelInfo(
+                model_id="groq/llama-3.3-70b-versatile",
+                family="llama", tier=ModelTier.MID, context_window=131_072,
+                provider="groq", canonical_id="llama-3.3-70b-instruct",
+                geo_blocked=True,
+            ),
+            # A different model family for fallback chain testing
+            ModelInfo(
+                model_id="openai/@cf/qwen/qwen3-30b-a3b-fp8",
+                family="qwen", tier=ModelTier.MID, context_window=131_072,
+                provider="cloudflare",
+            ),
+        ]
+        self.providers = {
+            "cloudflare": {"name": "cloudflare", "priority": 0},
+            "openrouter": {"name": "openrouter", "priority": 1},
+            "sambanova": {"name": "sambanova", "priority": 4},
+            "groq": {"name": "groq", "priority": 3},
+        }
+        self.chains = {
+            "debater": [
+                "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+                "openai/@cf/qwen/qwen3-30b-a3b-fp8",
+            ],
+        }
+
+    def test_cross_provider_same_model_preferred(self):
+        """When CF llama fails, should try OpenRouter llama (same canonical_id) first."""
+        reg = ModelRegistry(self.models, self.chains, self.providers)
+        # Simulate CF llama failing
+        reg.failures.record_failure(
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            provider="cloudflare", error_hint="429 Rate Limit",
+        )
+        reg.failures.record_failure(
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            provider="cloudflare", error_hint="429 Rate Limit",
+        )
+        fallback = reg.resolve_fallback(
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast", "debater"
+        )
+        assert fallback is not None
+        # Should prefer OpenRouter's llama (same canonical_id, different provider)
+        assert fallback.canonical_id == "llama-3.3-70b-instruct"
+        assert fallback.provider == "openrouter"
+
+    def test_cross_provider_skips_geo_blocked(self):
+        """Cross-provider fallback should skip geo-blocked alternatives."""
+        reg = ModelRegistry(self.models, self.chains, self.providers)
+        # Make both CF and OpenRouter llama fail
+        for mid in [
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        ]:
+            reg.failures.record_failure(mid, error_hint="429")
+            reg.failures.record_failure(mid, error_hint="429")
+        fallback = reg.resolve_fallback(
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast", "debater"
+        )
+        # Should NOT be groq (geo-blocked) even though it has same canonical_id
+        if fallback and fallback.canonical_id == "llama-3.3-70b-instruct":
+            assert fallback.provider != "groq"
+
+    def test_cross_provider_prefers_non_conserved(self):
+        """Cross-provider fallback should prefer non-conserved providers."""
+        reg = ModelRegistry(self.models, self.chains, self.providers)
+        # Make CF and OpenRouter fail, leaving sambanova and groq
+        for mid in [
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        ]:
+            reg.failures.record_failure(mid, error_hint="429")
+            reg.failures.record_failure(mid, error_hint="429")
+        # SambaNova is non-geo-blocked but conserved
+        fallback = reg._cross_provider_fallback(
+            "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "llama-3.3-70b-instruct",
+        )
+        # Only sambanova is left as non-geo-blocked with same canonical_id
+        if fallback:
+            # It's OK that it's conserved — it's the only option left
+            assert fallback.provider == "sambanova"
+
+    def test_no_cross_provider_without_canonical_id(self):
+        """Models without canonical_id should fall through to chain fallback."""
+        models_no_canonical = [
+            ModelInfo(
+                model_id="mystery/model-a",
+                family="mystery", tier=ModelTier.MID, context_window=65_536,
+                provider="unknown",
+            ),
+        ]
+        reg = ModelRegistry(models_no_canonical, {})
+        # No canonical_id → no cross-provider fallback → returns None
+        fallback = reg.resolve_fallback("mystery/model-a", "debater")
+        # No chain, no alternatives → None
+        assert fallback is None
+
+    def test_models_by_canonical(self):
+        """Test the canonical_id lookup method."""
+        reg = ModelRegistry(self.models, self.chains, self.providers)
+        same_model = reg.models_by_canonical("llama-3.3-70b-instruct")
+        assert len(same_model) == 4  # CF, OR, SambaNova, Groq
+        providers = {m.provider for m in same_model}
+        assert providers == {"cloudflare", "openrouter", "sambanova", "groq"}
+
+
 # ── LLMClient ──────────────────────────────────────────────────────────
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 
-from council.config import CouncilConfig, NLIConfig
+from council.config import CouncilConfig
 from council.models import LLMClient, ModelRegistry, TokenBudget
 from council.tools import ToolRegistry
 from council.types import Complexity, MissionBrief, RoleSpec
@@ -174,6 +174,9 @@ async def run_scout(
     if cfg.budget_override:
         brief.token_budget = cfg.budget_override
 
+    # Record scout token consumption in the brief
+    brief.scout_tokens_used = scout_budget.used
+
     logger.info(
         f"Scout complete: complexity={brief.complexity.value}, "
         f"roles={len(brief.suggested_roles)}, "
@@ -186,6 +189,8 @@ async def run_scout(
 
 def _select_scout_model(registry: ModelRegistry, config: CouncilConfig) -> str:
     """Select the model for the cheap scout agent."""
+    from council.types import ModelTier
+
     # Prefer local/cheap models for scouting
     constraints = {
         "local_only": config.local_only,
@@ -194,9 +199,7 @@ def _select_scout_model(registry: ModelRegistry, config: CouncilConfig) -> str:
     }
 
     # Try to find a cheap model
-    cheap_models = registry.models_by_tier(
-        __import__("council.types", fromlist=["ModelTier"]).ModelTier.CHEAP
-    )
+    cheap_models = registry.models_by_tier(ModelTier.CHEAP)
     if cheap_models:
         if config.family:
             family_match = [m for m in cheap_models if m.family == config.family]
@@ -209,8 +212,8 @@ def _select_scout_model(registry: ModelRegistry, config: CouncilConfig) -> str:
     if available:
         return available[0].model_id
 
-    # Last resort
-    return "openai/gpt-4.1-mini"
+    # No models available — can't proceed
+    raise RuntimeError("No models available for scout agent. Configure providers.yaml with at least one model.")
 
 
 def _select_verifier_model(registry: ModelRegistry, config: CouncilConfig) -> str:
@@ -230,8 +233,8 @@ def _select_verifier_model(registry: ModelRegistry, config: CouncilConfig) -> st
     if premium_models:
         return premium_models[0].model_id
 
-    # Last resort
-    return "openai/gpt-4.1-mini"
+    # No models available — can't proceed
+    raise RuntimeError("No models available for verifier agent. Configure providers.yaml with at least one model.")
 
 
 async def _preliminary_search(question: str, tools: ToolRegistry) -> str:
@@ -304,7 +307,10 @@ def _parse_mission_brief(brief_text: str, original_question: str) -> MissionBrie
             research_subquestions=data.get("research_subquestions", []),
             debate_rounds=data.get("debate_rounds", 1),
             token_budget=data.get("token_budget", 100_000),
-            human_checkpoints=data.get("human_checkpoints", []),
+            human_checkpoints=[
+                str(cp) if not isinstance(cp, str) else cp
+                for cp in data.get("human_checkpoints", [])
+            ],
             scout_reasoning=data.get("reasoning", ""),
             verification_notes=data.get("verification_notes", ""),
         )

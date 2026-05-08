@@ -103,13 +103,15 @@ async def run_research(
         return []
 
     # Calculate per-agent budget
+    # NOTE: The budget passed in is already the research sub-budget
+    # (engine.py applies research_share before calling us).
+    # Do NOT apply research_share again here — that would double-reduce.
     num_subquestions = len(brief.research_subquestions)
-    research_budget = int(budget.total * cfg.budget.research_share)
-    per_agent_budget = research_budget // num_subquestions
+    per_agent_budget = budget.total // num_subquestions
 
     logger.info(
         f"Starting research: {num_subquestions} sub-questions, "
-        f"budget={research_budget} tokens, mode={research_mode}"
+        f"budget={budget.total} tokens, mode={research_mode}"
     )
 
     # Select research models
@@ -171,7 +173,7 @@ def _create_research_roles(subquestions: list[str]) -> list[RoleSpec]:
                 name=f"Researcher_{i}",
                 perspective="Factual investigation",
                 expertise="Research",
-                suggested_model="alibaba",  # Cheap models for research
+                suggested_model="",  # Let registry pick from cheap tier
                 system_prompt=f"You are a research agent investigating: {sub_q}",
                 is_research=True,
                 research_subquestion=sub_q,
@@ -255,7 +257,10 @@ async def _run_research_agent(
         research_model = cheap_models[0].model_id
     else:
         available = registry.available_models()
-        research_model = available[0].model_id if available else "openai/gpt-4.1-mini"
+        if available:
+            research_model = available[0].model_id
+        else:
+            raise RuntimeError("No models available for research. Configure providers.yaml with at least one model.")
 
     prompt = RESEARCH_AGENT_PROMPT.format(sub_question=sub_question)
     user_msg = f"{prompt}\n\n## Search Results\n{search_context}"

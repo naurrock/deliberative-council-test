@@ -1,0 +1,54 @@
+# ── Secrets (NEVER commit) ──────────────────────────────────────────────
+.env
+.env.*
+!.env.template
+*.key
+.api_key_*
+
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+
+# ── uv ─────────────────────────────────────────────────────────────────
+.python-version
+
+# ── Checkpoint & runtime databases ────────────────────────────────────
+.council/
+
+# ── IDE / editor ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Generated output ──────────────────────────────────────────────────
+output/
+*.pdf
+*.docx
+!docs/*.pdf
+
+# ── Test artifacts ─────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# ── Root-level ad-hoc test scripts (not pytest-discoverable) ──────────
+/test_*.py

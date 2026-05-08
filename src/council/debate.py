@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from council.config import CouncilConfig, NLIConfig
 from council.context import build_agent_context
@@ -143,8 +143,7 @@ async def run_debate(
         evidence_reports=evidence,
     )
 
-    # Set up communication graph
-    agent_ids = [f"debater_{i}" for i in range(len(brief.suggested_roles))]
+    # Set up communication graph — only non-research roles debate
     non_research_roles = [r for r in brief.suggested_roles if not r.is_research]
     agent_ids = [f"debater_{i}" for i in range(len(non_research_roles))]
 
@@ -221,7 +220,19 @@ async def run_debate(
             break
         elif futility.confidence >= 0.3:
             # Heuristic is uncertain — escalate to LLM
-            futility_llm = await check_futility_llm(state, client)
+            # Use first available mid-tier model for futility check
+            from council.types import ModelTier
+            futility_model = None
+            mid_models = registry.models_by_tier(ModelTier.MID)
+            if mid_models:
+                futility_model = mid_models[0].model_id
+            else:
+                available = registry.available_models()
+                futility_model = available[0].model_id if available else None
+            if futility_model is None:
+                logger.warning("No model available for LLM futility check, skipping")
+                continue
+            futility_llm = await check_futility_llm(state, client, model_id=futility_model)
             if futility_llm.is_futile:
                 logger.info(f"LLM futility check: {futility_llm.reason}")
                 state.futility_flags.append(
@@ -248,12 +259,12 @@ async def _run_debate_round(
     registry: ModelRegistry,
     budget: TokenBudget,
     agent_models: dict[str, str],
-    non_research_roles: list,
+    non_research_roles: list[RoleSpec],
     nli_config: NLIConfig,
     graph_strategy: str,
     context_strategy: str,
     stability_history: dict[str, list[float]],
-    devil_assignments: dict,
+    devil_assignments: dict[str, Any],
 ) -> RoundResult:
     """Execute a single debate round."""
     agent_ids = list(agent_models.keys())
@@ -261,11 +272,14 @@ async def _run_debate_round(
     # Build context for each agent
     all_positions = _collect_prior_positions(state)
 
-    # Step 1: Generate positions for each agent
+    # Step 1: Generate positions for all agents concurrently
     positions: list[Position] = []
     position_map: dict[str, Position] = {}
 
-    for i, (agent_id, role) in enumerate(zip(agent_ids, non_research_roles)):
+    async def _generate_one_position(
+        agent_id: str, role: RoleSpec
+    ) -> Position:
+        """Generate a single agent's position (for concurrent execution)."""
         # Check if novelty injection is needed
         novelty_instruction = ""
         agent_stability = stability_history.get(agent_id, [])
@@ -301,22 +315,27 @@ async def _run_debate_round(
                 temperature=0.7,
             )
             budget.consume(tokens)
-
-            position = _parse_position(response_text, agent_id, role.name)
-            positions.append(position)
-            position_map[agent_id] = position
+            return _parse_position(response_text, agent_id, role.name)
 
         except Exception as e:
             logger.error(f"Failed to generate position for {agent_id}: {e}")
-            # Use a minimal fallback position
-            position = Position(
+            return Position(
                 agent_id=agent_id,
                 role_name=role.name,
                 argument=f"[Position generation failed: {str(e)[:100]}]",
                 self_confidence=0.5,
             )
-            positions.append(position)
-            position_map[agent_id] = position
+
+    # Run all position generations concurrently
+    position_results = await asyncio.gather(
+        *[
+            _generate_one_position(aid, role)
+            for aid, role in zip(agent_ids, non_research_roles)
+        ]
+    )
+    for pos in position_results:
+        positions.append(pos)
+        position_map[pos.agent_id] = pos
 
     # Step 2: Compute position stability
     if round_num > 0 and state.rounds:
@@ -405,7 +424,7 @@ async def _run_debate_round(
 
 
 def _assign_models_to_agents(
-    roles: list, registry: ModelRegistry, config: CouncilConfig
+    roles: list[RoleSpec], registry: ModelRegistry, config: CouncilConfig
 ) -> dict[str, str]:
     """Assign models to each debater, maximizing family diversity."""
     agent_models = {}
@@ -426,9 +445,11 @@ def _assign_models_to_agents(
             agent_models[agent_id] = model_info.model_id
             assigned_families.append(model_info.family)
         else:
-            # Fallback to first available
-            available = registry.available_models()
-            agent_models[agent_id] = available[0].model_id if available else "openai/gpt-4.1-mini"
+            # No model found for this debater — raise error
+            raise RuntimeError(
+                f"No model available for debater {agent_id}. "
+                f"Configure providers.yaml with at least one model."
+            )
 
     return agent_models
 
@@ -456,7 +477,7 @@ def _find_previous_position(agent_id: str, round_result: RoundResult) -> Positio
     return None
 
 
-def _get_role_for_agent(agent_id: str, roles: list, agent_ids: list[str]):
+def _get_role_for_agent(agent_id: str, roles: list[RoleSpec], agent_ids: list[str]) -> RoleSpec | None:
     """Get the RoleSpec for a given agent ID."""
     try:
         idx = agent_ids.index(agent_id)
@@ -504,7 +525,7 @@ def _parse_position(response_text: str, agent_id: str, role_name: str) -> Positi
 async def _generate_critique(
     agent_id: str,
     other_id: str,
-    role: object,
+    role: RoleSpec | None,
     own_position: Position,
     other_position: Position,
     client: LLMClient,

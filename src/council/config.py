@@ -14,7 +14,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-from council.types import Complexity, ModelTier, ResearchMode
+from council.types import Complexity, ModelTier, ProviderInfo, ResearchMode
 
 
 # ── Model Config ───────────────────────────────────────────────────────
@@ -31,6 +31,17 @@ class ModelConfig(BaseModel):
     output_cost_per_m: float = Field(default=0.0, description="Cost per M output tokens")
     supports_local: bool = Field(default=False)
     enabled: bool = Field(default=True)
+
+    # Provider routing
+    provider: str = Field(default="", description="Provider name")
+    api_base: str = Field(default="", description="Custom API base (may contain ${ENV_VAR})")
+    api_key: str = Field(default="", description="API key (may contain ${ENV_VAR})")
+    conserve: bool = Field(default=False, description="Non-regenerating credits — use sparingly")
+    geo_blocked: bool = Field(default=False, description="Provider is geo-blocked from this server")
+    canonical_id: str = Field(default="", description="Canonical model ID for cross-provider dedup")
+    rpm: int = Field(default=20, description="Requests per minute limit")
+    daily_quota: int = Field(default=0, description="Daily request quota (0=unlimited)")
+    regenerates: bool = Field(default=True, description="Whether daily quota regenerates")
 
 
 class FallbackChain(BaseModel):
@@ -77,8 +88,8 @@ class NLIConfig(BaseModel):
         description="Number of consecutive rounds above threshold for novelty injection",
     )
     tier2_model: str = Field(
-        default="openai/gpt-4.1-mini",
-        description="LLM model for Tier 2 agreement analysis",
+        default="openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        description="LLM model for Tier 2 agreement analysis (must be in providers.yaml)",
     )
     graceful_degradation: bool = Field(
         default=True,
@@ -197,6 +208,10 @@ class CouncilConfig(BaseModel):
         default_factory=list,
         description="Fallback chains per role type",
     )
+    providers: dict[str, ProviderInfo] = Field(
+        default_factory=dict,
+        description="Provider metadata (from providers: section). Key = provider name.",
+    )
 
     # Subsystem configs
     nli: NLIConfig = Field(default_factory=NLIConfig)
@@ -254,42 +269,61 @@ class CouncilConfig(BaseModel):
 # ── Loading ────────────────────────────────────────────────────────────
 
 
-# Default model configuration
+# Default model configuration — used only when no providers.yaml is found.
+# These are FREE-TIER models that require no payment. When providers.yaml
+# is present (the normal case), these defaults are ignored entirely.
 DEFAULT_MODELS: list[ModelConfig] = [
-    # OpenAI
-    ModelConfig(model_id="openai/gpt-4.1", family="openai", tier=ModelTier.PREMIUM, context_window=128_000, input_cost_per_m=2.00, output_cost_per_m=8.00),
-    ModelConfig(model_id="openai/gpt-4.1-mini", family="openai", tier=ModelTier.MID, context_window=128_000, input_cost_per_m=0.40, output_cost_per_m=1.60),
-    # Anthropic
-    ModelConfig(model_id="anthropic/claude-sonnet-4-20250514", family="anthropic", tier=ModelTier.PREMIUM, context_window=200_000, input_cost_per_m=3.00, output_cost_per_m=15.00),
-    ModelConfig(model_id="anthropic/claude-haiku-3-5-20241022", family="anthropic", tier=ModelTier.CHEAP, context_window=200_000, input_cost_per_m=0.80, output_cost_per_m=4.00),
-    # Google
-    ModelConfig(model_id="gemini/gemini-2.5-pro", family="google", tier=ModelTier.PREMIUM, context_window=1_000_000, input_cost_per_m=1.25, output_cost_per_m=10.00),
-    ModelConfig(model_id="gemini/gemini-2.5-flash", family="google", tier=ModelTier.MID, context_window=1_000_000, input_cost_per_m=0.15, output_cost_per_m=0.60),
-    # DeepSeek
-    ModelConfig(model_id="deepseek/deepseek-chat", family="deepseek", tier=ModelTier.MID, context_window=128_000, input_cost_per_m=0.27, output_cost_per_m=1.10, supports_local=True),
-    ModelConfig(model_id="deepseek/deepseek-reasoner", family="deepseek", tier=ModelTier.PREMIUM, context_window=128_000, input_cost_per_m=0.55, output_cost_per_m=2.19, supports_local=True),
-    # Alibaba
-    ModelConfig(model_id="dashscope/qwen3-235b", family="alibaba", tier=ModelTier.PREMIUM, context_window=128_000, input_cost_per_m=0.40, output_cost_per_m=1.20),
-    ModelConfig(model_id="dashscope/qwen3-32b", family="alibaba", tier=ModelTier.MID, context_window=128_000),
-    ModelConfig(model_id="ollama_chat/qwen3:8b", family="alibaba", tier=ModelTier.CHEAP, context_window=128_000, supports_local=True),
-    ModelConfig(model_id="dashscope/qwq-32b", family="alibaba", tier=ModelTier.MID, context_window=128_000),
-    # Meta
-    ModelConfig(model_id="meta_llama/llama-4-maverick", family="meta", tier=ModelTier.MID, context_window=1_000_000, input_cost_per_m=0.20, output_cost_per_m=0.80),
-    ModelConfig(model_id="ollama_chat/llama4-scout", family="meta", tier=ModelTier.CHEAP, context_window=1_000_000, supports_local=True),
-    # Mistral
-    ModelConfig(model_id="mistral/mistral-large", family="mistral", tier=ModelTier.PREMIUM, context_window=128_000, input_cost_per_m=2.00, output_cost_per_m=6.00),
-    ModelConfig(model_id="mistral/mistral-small", family="mistral", tier=ModelTier.CHEAP, context_window=128_000, input_cost_per_m=0.20, output_cost_per_m=0.60, supports_local=True),
-    # Microsoft
-    ModelConfig(model_id="ollama_chat/phi4-mini", family="microsoft", tier=ModelTier.CHEAP, context_window=128_000, input_cost_per_m=0.10, output_cost_per_m=0.40, supports_local=True),
-    # Moonshot
-    ModelConfig(model_id="moonshot/kimi-k2", family="moonshot", tier=ModelTier.PREMIUM, context_window=128_000, input_cost_per_m=1.50, output_cost_per_m=6.00),
+    # Cloudflare Workers AI — Priority 0, daily regenerating
+    ModelConfig(model_id="openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast", family="llama", tier=ModelTier.MID, context_window=131_072, provider="cloudflare"),
+    ModelConfig(model_id="openai/@cf/qwen/qwen3-30b-a3b-fp8", family="qwen", tier=ModelTier.MID, context_window=131_072, provider="cloudflare"),
+    ModelConfig(model_id="openai/@cf/meta/llama-3.2-3b-instruct", family="llama", tier=ModelTier.CHEAP, context_window=131_072, provider="cloudflare"),
+    # OpenRouter — Priority 1, 50 RPD free tier
+    ModelConfig(model_id="openrouter/meta-llama/llama-3.3-70b-instruct:free", family="llama", tier=ModelTier.MID, context_window=65_536, provider="openrouter"),
+    ModelConfig(model_id="openrouter/qwen/qwen3-coder:free", family="qwen", tier=ModelTier.MID, context_window=262_000, provider="openrouter"),
+    ModelConfig(model_id="openrouter/meta-llama/llama-3.2-3b-instruct:free", family="llama", tier=ModelTier.CHEAP, context_window=131_072, provider="openrouter"),
 ]
 
 DEFAULT_FALLBACK_CHAINS: list[FallbackChain] = [
-    FallbackChain(role_type="research", chain=["ollama_chat/qwen3:8b", "anthropic/claude-haiku-3-5-20241022", "ollama_chat/llama4-scout"]),
-    FallbackChain(role_type="debater", chain=["openai/gpt-4.1-mini", "gemini/gemini-2.5-flash", "deepseek/deepseek-chat"]),
-    FallbackChain(role_type="synthesizer", chain=["anthropic/claude-sonnet-4-20250514", "openai/gpt-4.1", "gemini/gemini-2.5-pro"]),
+    FallbackChain(role_type="research", chain=[
+        "openai/@cf/meta/llama-3.2-3b-instruct",
+        "openrouter/meta-llama/llama-3.2-3b-instruct:free",
+    ]),
+    FallbackChain(role_type="debater", chain=[
+        "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "openai/@cf/qwen/qwen3-30b-a3b-fp8",
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+    ]),
+    FallbackChain(role_type="synthesizer", chain=[
+        "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+    ]),
 ]
+
+
+def _expand_env_vars(value: str) -> str:
+    """Expand ${VAR_NAME} references in a string with environment variables."""
+    import re
+    def replacer(match):
+        var_name = match.group(1)
+        return os.environ.get(var_name, match.group(0))
+    return re.sub(r'\$\{(\w+)\}', replacer, value)
+
+
+def _auto_find_config() -> Path | None:
+    """Find the providers.yaml config file automatically.
+
+    Search order:
+    1. ./config/providers.yaml (relative to CWD)
+    2. ~/.config/deliberative-council/providers.yaml
+    """
+    candidates = [
+        Path.cwd() / "config" / "providers.yaml",
+        Path.home() / ".config" / "deliberative-council" / "providers.yaml",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
 
 def load_config(config_path: str | Path | None = None, **overrides) -> CouncilConfig:
@@ -298,7 +332,8 @@ def load_config(config_path: str | Path | None = None, **overrides) -> CouncilCo
     Priority (highest to lowest):
     1. Explicit keyword arguments (from CLI flags)
     2. YAML file values
-    3. Built-in defaults
+    3. Auto-discovered config/providers.yaml
+    4. Built-in defaults
     """
     config_data: dict = {}
 
@@ -309,6 +344,48 @@ def load_config(config_path: str | Path | None = None, **overrides) -> CouncilCo
                 config_data = yaml.safe_load(f) or {}
         else:
             raise FileNotFoundError(f"Config file not found: {path}")
+    else:
+        # Auto-discover providers.yaml
+        auto_path = _auto_find_config()
+        if auto_path is not None:
+            with open(auto_path) as f:
+                config_data = yaml.safe_load(f) or {}
+
+    # Expand env vars in model api_base and api_key fields
+    if "models" in config_data:
+        for m in config_data["models"]:
+            if isinstance(m, dict):
+                for key in ("api_base", "api_key"):
+                    if key in m and isinstance(m[key], str):
+                        m[key] = _expand_env_vars(m[key])
+
+    # Parse the providers: section into ProviderInfo objects
+    if "providers" in config_data:
+        raw_providers = config_data.pop("providers")
+        if isinstance(raw_providers, dict):
+            parsed_providers = {}
+            for name, info in raw_providers.items():
+                if isinstance(info, dict):
+                    info["name"] = name
+                    # Expand env vars in api_base_template
+                    if "api_base_template" in info and isinstance(info["api_base_template"], str):
+                        info["api_base_template"] = _expand_env_vars(info["api_base_template"])
+                    # Map provider-level geo_blocked to all its models
+                    # (models already read this from their own geo_blocked field,
+                    # but we also store it at the provider level for awareness)
+                    parsed_providers[name] = ProviderInfo(**info)
+            config_data["providers"] = parsed_providers
+
+    # Normalize fallback_chains: providers.yaml uses dict format
+    # {role_type: [model_ids]}, but CouncilConfig expects list of
+    # FallbackChain(role_type=..., chain=[...]).
+    if "fallback_chains" in config_data:
+        fc = config_data["fallback_chains"]
+        if isinstance(fc, dict):
+            config_data["fallback_chains"] = [
+                {"role_type": role_type, "chain": chain}
+                for role_type, chain in fc.items()
+            ]
 
     # Merge overrides on top of file values
     for key, value in overrides.items():
@@ -320,6 +397,17 @@ def load_config(config_path: str | Path | None = None, **overrides) -> CouncilCo
         config_data["models"] = [m.model_dump() for m in DEFAULT_MODELS]
     if "fallback_chains" not in config_data:
         config_data["fallback_chains"] = [f.model_dump() for f in DEFAULT_FALLBACK_CHAINS]
+
+    # Strip non-ModelConfig fields from model dicts (providers.yaml includes
+    # extra metadata like 'provider' at the top level that isn't a ModelConfig field)
+    if "models" in config_data:
+        valid_fields = set(ModelConfig.model_fields.keys())
+        for m in config_data["models"]:
+            if isinstance(m, dict):
+                # Remove keys that aren't valid ModelConfig fields
+                extra_keys = [k for k in m if k not in valid_fields]
+                for k in extra_keys:
+                    del m[k]
 
     return CouncilConfig(**config_data)
 
@@ -347,7 +435,7 @@ nli:
   convergence_rounds: 2
   position_stability_threshold: 0.80
   position_stability_rounds: 2
-  tier2_model: "openai/gpt-4.1-mini"
+  tier2_model: "openrouter/meta-llama/llama-3.3-70b-instruct:free"
   graceful_degradation: true
 
 # Token budgets

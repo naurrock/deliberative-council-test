@@ -161,101 +161,97 @@ async def run_council(
     # Check for existing checkpoint (resume support)
     existing_phase = checkpoint.get_phase() if cfg.resume else None
 
-    # ── Phase 1: Scout ──────────────────────────────────────────────────
-    brief: MissionBrief | None = None
-    if existing_phase and existing_phase in ("scout", "research", "debate", "synthesis"):
-        cp = checkpoint.load_checkpoint()
-        if cp and cp["brief_json"]:
-            brief = MissionBrief.model_validate_json(cp["brief_json"])
-            logger.info(f"Resumed from checkpoint: scout phase already complete")
+    try:
+        # ── Phase 1: Scout ──────────────────────────────────────────────────
+        brief: MissionBrief | None = None
+        if existing_phase and existing_phase in ("scout", "research", "debate", "synthesis"):
+            cp = checkpoint.load_checkpoint()
+            if cp and cp["brief_json"]:
+                brief = MissionBrief.model_validate_json(cp["brief_json"])
+                logger.info(f"Resumed from checkpoint: scout phase already complete")
 
-    if brief is None:
-        logger.info("Phase 1: Scout")
-        brief = await run_scout(question, client, registry, tools, cfg)
-        checkpoint.save_brief(brief)
-        logger.info(f"Scout complete: complexity={brief.complexity.value}")
+        if brief is None:
+            logger.info("Phase 1: Scout")
+            brief = await run_scout(question, client, registry, tools, cfg)
+            checkpoint.save_brief(brief)
+            logger.info(f"Scout complete: complexity={brief.complexity.value}")
 
-    # For trivial questions, skip to single-model synthesis
-    if brief.complexity == Complexity.TRIVIAL:
-        logger.info("Trivial question — skipping to synthesis")
-        debate_state = DebateState(mission_brief=brief)
-        report = await run_synthesis(brief, [], debate_state, client, registry, cfg)
-        report.pipeline_trace.scout_tokens = budget.used
-        await tools.close()
+        # For trivial questions, skip to single-model synthesis
+        if brief.complexity == Complexity.TRIVIAL:
+            logger.info("Trivial question — skipping to synthesis")
+            debate_state = DebateState(mission_brief=brief)
+            report = await run_synthesis(brief, [], debate_state, client, registry, cfg)
+            report.pipeline_trace.scout_tokens = brief.scout_tokens_used
+            return report
+
+        # ── Phase 2: Research ───────────────────────────────────────────────
+        evidence: list[EvidenceReport] = []
+        if existing_phase and existing_phase in ("research", "debate", "synthesis"):
+            cp = checkpoint.load_checkpoint()
+            if cp and cp["evidence_json"]:
+                evidence_data = json.loads(cp["evidence_json"])
+                evidence = [EvidenceReport(**e) for e in evidence_data]
+                logger.info(f"Resumed from checkpoint: research already complete ({len(evidence)} reports)")
+
+        if not evidence and brief.research_needed:
+            logger.info("Phase 2: Research")
+            # Create a separate research budget
+            research_budget = TokenBudget(
+                total=int(budget.total * cfg.budget.research_share)
+            )
+            evidence = await run_research(brief, client, registry, tools, research_budget, cfg)
+            budget.consume(research_budget.used)
+            checkpoint.save_evidence(evidence)
+            logger.info(f"Research complete: {len(evidence)} reports")
+        elif not brief.research_needed:
+            logger.info("Research not needed — skipping")
+
+        # ── Phase 3: Debate ─────────────────────────────────────────────────
+        debate_state: DebateState | None = None
+        if existing_phase and existing_phase in ("debate", "synthesis"):
+            cp = checkpoint.load_checkpoint()
+            if cp and cp["debate_state_json"]:
+                debate_state = DebateState.model_validate_json(cp["debate_state_json"])
+                logger.info(f"Resumed from checkpoint: debate already complete")
+
+        if debate_state is None or not debate_state.is_resolved:
+            logger.info("Phase 3: Debate")
+            debate_budget = TokenBudget(
+                total=int(budget.total * cfg.budget.debate_share)
+            )
+            debate_state = await run_debate(
+                brief=brief,
+                evidence=evidence,
+                client=client,
+                registry=registry,
+                budget=debate_budget,
+                config=cfg,
+                prior_state=debate_state,
+                graph_strategy=cfg.debate.graph_strategy,
+                debate_strategy=cfg.debate.debate_strategy,
+                context_strategy=cfg.debate.context_strategy,
+            )
+            budget.consume(debate_budget.used)
+            checkpoint.save_debate_state(debate_state)
+            logger.info(f"Debate complete: {len(debate_state.rounds)} rounds")
+        else:
+            logger.info("Debate already resolved from checkpoint")
+
+        # ── Phase 4: Synthesis ──────────────────────────────────────────────
+        logger.info("Phase 4: Synthesis")
+        report = await run_synthesis(brief, evidence, debate_state, client, registry, cfg)
+
+        # Update pipeline trace with scout tokens from the brief
+        report.pipeline_trace.scout_tokens = brief.scout_tokens_used
+
+        logger.info(
+            f"Council run {rid} complete. "
+            f"Complexity={brief.complexity.value}, "
+            f"Rounds={len(debate_state.rounds)}, "
+            f"Total tokens={report.pipeline_trace.total_tokens}"
+        )
+
         return report
-
-    # ── Phase 2: Research ───────────────────────────────────────────────
-    evidence: list[EvidenceReport] = []
-    if existing_phase and existing_phase in ("research", "debate", "synthesis"):
-        cp = checkpoint.load_checkpoint()
-        if cp and cp["evidence_json"]:
-            evidence_data = json.loads(cp["evidence_json"])
-            evidence = [EvidenceReport(**e) for e in evidence_data]
-            logger.info(f"Resumed from checkpoint: research already complete ({len(evidence)} reports)")
-
-    if not evidence and brief.research_needed:
-        logger.info("Phase 2: Research")
-        # Create a separate research budget
-        research_budget = TokenBudget(
-            total=int(budget.total * cfg.budget.research_share)
-        )
-        evidence = await run_research(brief, client, registry, tools, research_budget, cfg)
-        budget.consume(research_budget.used)
-        checkpoint.save_evidence(evidence)
-        logger.info(f"Research complete: {len(evidence)} reports")
-    elif not brief.research_needed:
-        logger.info("Research not needed — skipping")
-
-    # ── Phase 3: Debate ─────────────────────────────────────────────────
-    debate_state: DebateState | None = None
-    if existing_phase and existing_phase in ("debate", "synthesis"):
-        cp = checkpoint.load_checkpoint()
-        if cp and cp["debate_state_json"]:
-            debate_state = DebateState.model_validate_json(cp["debate_state_json"])
-            logger.info(f"Resumed from checkpoint: debate already complete")
-
-    if debate_state is None or not debate_state.is_resolved:
-        logger.info("Phase 3: Debate")
-        debate_budget = TokenBudget(
-            total=int(budget.total * cfg.budget.debate_share)
-        )
-        debate_state = await run_debate(
-            brief=brief,
-            evidence=evidence,
-            client=client,
-            registry=registry,
-            budget=debate_budget,
-            config=cfg,
-            prior_state=debate_state,
-            graph_strategy=cfg.debate.graph_strategy,
-            debate_strategy=cfg.debate.debate_strategy,
-            context_strategy=cfg.debate.context_strategy,
-        )
-        budget.consume(debate_budget.used)
-        checkpoint.save_debate_state(debate_state)
-        logger.info(f"Debate complete: {len(debate_state.rounds)} rounds")
-    else:
-        logger.info("Debate already resolved from checkpoint")
-
-    # ── Phase 4: Synthesis ──────────────────────────────────────────────
-    logger.info("Phase 4: Synthesis")
-    report = await run_synthesis(brief, evidence, debate_state, client, registry, cfg)
-
-    # Update pipeline trace with scout tokens
-    report.pipeline_trace.scout_tokens = budget.used - (
-        report.pipeline_trace.research_tokens
-        + report.pipeline_trace.debate_tokens
-        + report.pipeline_trace.synthesis_tokens
-    )
-
-    # Save final report
-    await tools.close()
-
-    logger.info(
-        f"Council run {rid} complete. "
-        f"Complexity={brief.complexity.value}, "
-        f"Rounds={len(debate_state.rounds)}, "
-        f"Total tokens={report.pipeline_trace.total_tokens}"
-    )
-
-    return report
+    finally:
+        # Always close HTTP sessions, even on error
+        await tools.close()
